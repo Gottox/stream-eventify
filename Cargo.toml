@@ -12,3 +12,4 @@ tokio-stream = { version = "0.1.11", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.22.0", default-features = false, features = ["test-util", "rt", "macros"] }
+tokio-test = "0.4.2"

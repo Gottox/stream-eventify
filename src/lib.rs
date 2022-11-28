@@ -1,8 +1,13 @@
+#![doc = include_str!("../README.md")]
 use pin_project_lite::pin_project;
-use std::{collections::HashSet, hash::Hash, task::Poll};
+use std::{
+    collections::{HashSet, VecDeque},
+    hash::Hash,
+    task::Poll,
+};
 use tokio_stream::Stream;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Action<T> {
     Add(T),
     Remove(T),
@@ -10,42 +15,37 @@ pub enum Action<T> {
 
 #[derive(Debug)]
 struct Inner<T> {
-    last: HashSet<T>,
-    added_queue: Vec<T>,
-    removed_queue: Vec<T>,
+    state: HashSet<T>,
+    action_queue: VecDeque<Action<T>>,
 }
 
 impl<T: Hash + Eq + Clone> Inner<T> {
     fn new() -> Self {
         Self {
-            last: HashSet::new(),
-            added_queue: Vec::new(),
-            removed_queue: Vec::new(),
+            state: HashSet::new(),
+            action_queue: Default::default(),
         }
     }
 
     fn next_from_queue(&mut self) -> Option<Action<T>> {
-        if let Some(added) = self.added_queue.pop() {
-            return Some(Action::Add(added));
-        }
-        if let Some(removed) = self.removed_queue.pop() {
-            return Some(Action::Remove(removed));
-        }
-        None
+        self.action_queue.pop_front()
     }
 
-    fn update<I>(&mut self, iter: I)
+    fn update<I>(&mut self, new_state: I)
     where
         I: IntoIterator<Item = T>,
     {
-        let new_state: HashSet<T> = HashSet::from_iter(iter);
+        let old_state = &self.state;
+        let new_state = HashSet::from_iter(new_state);
 
-        self.added_queue
-            .extend(new_state.difference(&self.last).cloned());
-        self.removed_queue
-            .extend(self.last.difference(&new_state).cloned());
-
-        self.last = new_state;
+        let add_iter = new_state
+            .difference(&self.state)
+            .map(|x| Action::Add(x.clone()));
+        let remove_iter = old_state
+            .difference(&new_state)
+            .map(|x| Action::Remove(x.clone()));
+        self.action_queue = remove_iter.chain(add_iter).collect();
+        self.state = new_state;
     }
 }
 
@@ -65,7 +65,7 @@ impl<S, I, T> StreamDiff<S, I, T>
 where
     S: Stream<Item = I>,
     I: IntoIterator<Item = T>,
-    T: Clone + Hash + Eq,
+    T: Hash + Eq + Sized + Clone,
 {
     pub fn new(stream: S) -> Self {
         Self {
@@ -90,17 +90,17 @@ where
         loop {
             let me = self.as_mut().project();
 
-            if let Some(item) = me.inner.next_from_queue() {
-                return Poll::Ready(Some(item));
+            if let Some(action) = me.inner.next_from_queue() {
+                return Poll::Ready(Some(action));
             }
 
-            let item = match me.stream.poll_next(cx) {
+            let state = match me.stream.poll_next(cx) {
                 Poll::Ready(Some(item)) => item,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             };
 
-            me.inner.update(item);
+            me.inner.update(state);
         }
     }
 
@@ -109,11 +109,11 @@ where
     }
 }
 
-trait StreamDiffExt<I, T>
+pub trait StreamDiffExt<I, T>
 where
     Self: Stream<Item = I> + Sized,
     I: IntoIterator<Item = T>,
-    T: Clone + Hash + Eq,
+    T: Hash + Eq + Sized + Clone,
 {
     fn diff(self) -> StreamDiff<Self, I, T>;
 }
@@ -122,7 +122,7 @@ impl<S, I, T> StreamDiffExt<I, T> for S
 where
     S: Stream<Item = I> + Sized,
     I: IntoIterator<Item = T>,
-    T: Clone + Hash + Eq,
+    T: Hash + Eq + Sized + Clone,
 {
     fn diff(self) -> StreamDiff<Self, I, T> {
         StreamDiff::new(self)
@@ -137,6 +137,7 @@ mod tests {
     #[tokio::test]
     async fn test() {
         let states = [
+            vec![],
             vec![1],
             vec![1],
             vec![1, 2],
